@@ -4,10 +4,10 @@ A lightweight, modular component for real-time face mesh detection and sci-fi sc
 """
 
 import cv2
-import mediapipe as mp
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 import time
+import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -16,18 +16,51 @@ class FaceScanner:
     """Real-time face mesh scanner with passive liveness detection."""
     
     def __init__(self):
-        """Initialize MediaPipe Face Mesh and animation state."""
-        # Initialize MediaPipe Face Landmarker
+        """Initialize MediaPipe Face Landmarker and animation state."""
+        # Initialize MediaPipe Face Landmarker (new API)
         model_path = 'face_landmarker.task'
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.FaceLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO,
+            running_mode=vision.RunningMode.IMAGE,  # Use IMAGE mode for simpler processing
             num_faces=1,
             min_face_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        self.face_mesh = vision.FaceLandmarker.create_from_options(options)
+        self.face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        
+        # Simplified face mesh connections (key contours without full tesselation)
+        # These are the major facial feature contours
+        self.FACE_CONNECTIONS = []
+        
+        # Face oval
+        face_oval = list(range(10, 338)) + list(range(338, 297)) + list(range(297, 332)) + list(range(332, 284)) + list(range(284, 251)) + list(range(251,  398)) + list(range(398, 362)) + list(range(362, 10))
+        
+        # Left eye
+        left_eye = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246, 33]
+        
+        # Right eye  
+        right_eye = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466, 263]
+        
+        # Lips outer
+        lips_outer = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 61]
+        
+        # Lips inner
+        lips_inner = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191, 78]
+        
+        # Nose
+        nose = [168, 6, 197, 195, 5, 4, 1, 19, 94, 2]
+        
+        # Left eyebrow
+        left_eyebrow = [70, 63, 105, 66, 107, 55, 193]
+        
+        # Right eyebrow
+        right_eyebrow = [300, 293, 334, 296, 336, 285, 417]
+        
+        # Create connections from contours
+        for contour in [face_oval[:20], left_eye, right_eye, lips_outer, lips_inner, nose, left_eyebrow, right_eyebrow]:
+            for i in range(len(contour) - 1):
+                self.FACE_CONNECTIONS.append((contour[i], contour[i+1]))
         
         # Animation state
         self.scan_position = 0
@@ -45,6 +78,9 @@ class FaceScanner:
         self.LEFT_EYE = [362, 385, 387, 263, 373, 380]
         self.RIGHT_EYE = [33, 160, 158, 133, 153, 144]
         
+        # Frame counter
+        self.frame_count = 0
+        
     def update_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, float, bool]:
         """
         Process a video frame and return annotated frame with liveness info.
@@ -55,17 +91,20 @@ class FaceScanner:
         Returns:
             Tuple of (annotated_frame, liveness_score, is_real)
         """
+        self.frame_count += 1
+        
         # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         
-        # Process face mesh
-        results = self.face_mesh.process(rgb_frame)
+        # Process face landmarks
+        results = self.face_landmarker.detect(mp_image)
         
         liveness_score = 0.0
         is_real = False
         
-        if results.multi_face_landmarks:
-            face_landmarks = results.multi_face_landmarks[0]
+        if results.face_landmarks:
+            face_landmarks = results.face_landmarks[0]
             
             # Calculate liveness score
             liveness_score = self._get_liveness_score(face_landmarks, frame.shape)
@@ -87,19 +126,17 @@ class FaceScanner:
         Calculate liveness score based on depth variance and eye aspect ratio.
         
         Args:
-            face_landmarks: MediaPipe face landmarks
+            face_landmarks: MediaPipe face landmarks list
             frame_shape: Shape of the video frame (height, width, channels)
             
         Returns:
             Liveness score between 0.0 (fake) and 1.0 (real)
         """
-        landmarks = face_landmarks.landmark
-        
         # 1. Calculate depth variance (Z-axis)
-        depth_score = self._calculate_depth_score(landmarks)
+        depth_score = self._calculate_depth_score(face_landmarks)
         
         # 2. Calculate Eye Aspect Ratio (blink detection)
-        ear_score = self._calculate_ear_score(landmarks)
+        ear_score = self._calculate_ear_score(face_landmarks)
         
         # 3. Weighted combination
         liveness_score = (depth_score * 0.6) + (ear_score * 0.4)
@@ -201,7 +238,6 @@ class FaceScanner:
     def _draw_hud(self, frame: np.ndarray, face_landmarks, liveness_score: float, is_real: bool) -> np.ndarray:
         """Draw sci-fi HUD with face mesh and scanning animation."""
         h, w, _ = frame.shape
-        landmarks = face_landmarks.landmark
         
         # Choose color based on liveness
         if is_real:
@@ -214,11 +250,11 @@ class FaceScanner:
             status_color = (0, 0, 255)
         
         # Draw face mesh (wireframe)
-        self._draw_face_mesh(frame, landmarks, mesh_color, w, h)
+        self._draw_face_mesh(frame, face_landmarks, mesh_color, w, h)
         
         # Get face bounding box
-        x_coords = [landmark.x * w for landmark in landmarks]
-        y_coords = [landmark.y * h for landmark in landmarks]
+        x_coords = [landmark.x * w for landmark in face_landmarks]
+        y_coords = [landmark.y * h for landmark in face_landmarks]
         
         x_min, x_max = int(min(x_coords)), int(max(x_coords))
         y_min, y_max = int(min(y_coords)), int(max(y_coords))
@@ -243,22 +279,21 @@ class FaceScanner:
         
         return frame
     
-    def _draw_face_mesh(self, frame: np.ndarray, landmarks, color: Tuple[int, int, int], w: int, h: int):
+    def _draw_face_mesh(self, frame: np.ndarray, face_landmarks, color: Tuple[int, int, int], w: int, h: int):
         """Draw wireframe face mesh."""
-        # MediaPipe Face Mesh tesselation connections
-        FACE_CONNECTIONS = self.mp_face_mesh.FACEMESH_TESSELATION
-        
-        for connection in FACE_CONNECTIONS:
+        # Draw simplified face connections
+        for connection in self.FACE_CONNECTIONS:
             start_idx = connection[0]
             end_idx = connection[1]
             
-            start_point = landmarks[start_idx]
-            end_point = landmarks[end_idx]
-            
-            start = (int(start_point.x * w), int(start_point.y * h))
-            end = (int(end_point.x * w), int(end_point.y * h))
-            
-            cv2.line(frame, start, end, color, 1, cv2.LINE_AA)
+            if start_idx < len(face_landmarks) and end_idx < len(face_landmarks):
+                start_point = face_landmarks[start_idx]
+                end_point = face_landmarks[end_idx]
+                
+                start = (int(start_point.x * w), int(start_point.y * h))
+                end = (int(end_point.x * w), int(end_point.y * h))
+                
+                cv2.line(frame, start, end, color, 1, cv2.LINE_AA)
     
     def _draw_scan_beam(self, frame: np.ndarray, x_min: int, x_max: int, 
                        y_min: int, y_max: int, color: Tuple[int, int, int]):
@@ -273,8 +308,8 @@ class FaceScanner:
         cv2.line(frame, (x_min, beam_y), (x_max, beam_y), color, beam_thickness)
         
         # Gradient trail
-        for i in range(1, 15):  # Reduced range for a tighter glow
-            alpha = 1.0 - (i / 15)  # Fading effect
+        for i in range(1, 15):
+            alpha = 1.0 - (i / 15)
             trail_color = tuple(int(c * alpha) for c in color)
             
             # Above the beam
